@@ -282,7 +282,7 @@ if uploaded_file:
     # Add filter option for two-model comparisons
     show_only_differences = False
     if len(model_columns) == 2:
-        show_only_differences = st.checkbox("Show only differences", value=False)
+        show_only_differences = st.sidebar.checkbox("Show only differences", value=False)
     
     # Display comparison metrics for two models
     if len(model_columns) == 2:
