@@ -9,6 +9,17 @@ import time
 import os
 
 
+# Initialize session state for important variables
+if 'hf_api_key' not in st.session_state:
+    st.session_state.hf_api_key = "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"  # Default API key
+
+if 'matching_mode' not in st.session_state:
+    st.session_state.matching_mode = "Exact Match"
+
+if "hf_cache" not in st.session_state:
+    st.session_state.hf_cache = {}
+
+
 # Hugging Face API functions
 def compare_with_huggingface(text1, text2, field_name, api_key):
     """
@@ -17,8 +28,6 @@ def compare_with_huggingface(text1, text2, field_name, api_key):
     """
     # Create a cache key to avoid redundant API calls
     cache_key = f"{text1.lower()}|||{text2.lower()}|||{field_name.lower()}"
-    if "hf_cache" not in st.session_state:
-        st.session_state.hf_cache = {}
     
     # Return cached result if available
     if cache_key in st.session_state.hf_cache:
@@ -135,10 +144,14 @@ def are_values_similar_basic(val1, val2, field_name=None, fuzzy_match=False):
     return False
 
 
-def are_values_similar(val1, val2, field_name=None, matching_mode="Exact Match", api_key=None):
+def are_values_similar(val1, val2, field_name=None, matching_mode=None, api_key=None):
     """
     Compare two values based on the selected matching mode.
     """
+    # Use session state matching mode if not provided
+    if matching_mode is None:
+        matching_mode = st.session_state.matching_mode
+        
     val1 = str(val1).strip()
     val2 = str(val2).strip()
     
@@ -150,11 +163,15 @@ def are_values_similar(val1, val2, field_name=None, matching_mode="Exact Match",
     if matching_mode == "Exact Match":
         return False
     
+    # If using Basic Fuzzy Match
+    if matching_mode == "Basic Fuzzy Match":
+        return are_values_similar_basic(val1, val2, field_name, True)
+    
     # If using Hugging Face GPT2
     if matching_mode == "Hugging Face GPT2" and api_key:
         return compare_with_huggingface(val1, val2, field_name, api_key)
     
-    # Otherwise use basic fuzzy matching
+    # Fall back to basic fuzzy matching
     return are_values_similar_basic(val1, val2, field_name, True)
 
 
@@ -207,11 +224,15 @@ def parse_json(df):
     return parsed_data, sorted(fields)
 
 
-def field_level_view(parsed_data, field, matching_mode="Exact Match", show_only_differences=False, api_key=None):
+def field_level_view(parsed_data, field, matching_mode=None, show_only_differences=False, api_key=None):
     """
     Generate a view of field values across models.
     If show_only_differences is True, only show rows where models differ.
     """
+    # Use session state matching mode if not provided
+    if matching_mode is None:
+        matching_mode = st.session_state.matching_mode
+        
     def format_value(val):
         """
         Normalize and convert all values to a list of cleaned strings.
@@ -290,11 +311,15 @@ def field_level_view(parsed_data, field, matching_mode="Exact Match", show_only_
     return styled_df, df
 
 
-def calculate_metrics(df1, df2, field_name=None, matching_mode="Exact Match", api_key=None):
+def calculate_metrics(df1, df2, field_name=None, matching_mode=None, api_key=None):
     """
     Calculate confusion matrix and metrics between two models.
     df1 is considered the "truth" and df2 is the prediction.
     """
+    # Use session state matching mode if not provided
+    if matching_mode is None:
+        matching_mode = st.session_state.matching_mode
+        
     true_positive = 0
     true_negative = 0
     false_positive = 0
@@ -350,14 +375,20 @@ def calculate_metrics(df1, df2, field_name=None, matching_mode="Exact Match", ap
 st.set_page_config(page_title="Fact Comparison by Field", layout="wide")
 st.sidebar.title("Fact Comparison by Field")
 
-# Initialize session state for Hugging Face API key if not present
-if 'hf_api_key' not in st.session_state:
-    st.session_state.hf_api_key = "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"  # Default API key
+# Function to handle matching mode change
+def update_matching_mode():
+    st.session_state.matching_mode = st.session_state.temp_matching_mode
+    # Clear the cache when changing modes
+    st.session_state.hf_cache = {}
 
 # Add matching mode selection in sidebar
-matching_mode = st.sidebar.radio(
-    "Matching Mode:",
+st.sidebar.subheader("Matching Mode Settings")
+st.session_state.temp_matching_mode = st.sidebar.radio(
+    "Select Matching Mode:",
     ["Exact Match", "Basic Fuzzy Match", "Hugging Face GPT2"],
+    key="matching_mode_radio",
+    on_change=update_matching_mode,
+    index=["Exact Match", "Basic Fuzzy Match", "Hugging Face GPT2"].index(st.session_state.matching_mode),
     help="""
     Exact Match: Values must be exactly the same.
     Basic Fuzzy Match: Similar error messages are considered the same using rules and string similarity.
@@ -366,14 +397,22 @@ matching_mode = st.sidebar.radio(
 )
 
 # Show API key configuration when Hugging Face GPT2 is selected
-if matching_mode == "Hugging Face GPT2":
-    with st.sidebar.expander("Hugging Face API Settings", expanded=False):
-        st.session_state.hf_api_key = st.text_input(
+if st.session_state.matching_mode == "Hugging Face GPT2":
+    with st.sidebar.expander("Hugging Face API Settings", expanded=True):
+        new_api_key = st.text_input(
             "API Key",
             value=st.session_state.hf_api_key,
             type="password",
+            key="hf_api_key_input",
             help="Enter your Hugging Face API key"
         )
+        
+        # Update API key if changed
+        if new_api_key != st.session_state.hf_api_key:
+            st.session_state.hf_api_key = new_api_key
+            # Clear cache when API key changes
+            st.session_state.hf_cache = {}
+            
         st.info("Using GPT2 model to compare text semantically")
 
 st.title("LLM Output Comparator")
@@ -393,7 +432,10 @@ if uploaded_file:
         show_only_differences = st.checkbox("Show only differences", value=False)
     
     # Get API key if using Hugging Face
-    api_key = st.session_state.hf_api_key if matching_mode == "Hugging Face GPT2" else None
+    api_key = st.session_state.hf_api_key if st.session_state.matching_mode == "Hugging Face GPT2" else None
+    
+    # Display current matching mode
+    st.write(f"Current matching mode: **{st.session_state.matching_mode}**")
     
     # Display comparison metrics for two models
     if len(model_columns) == 2:
@@ -406,27 +448,27 @@ if uploaded_file:
         st.write(f"Using **{larger_model}** as the reference model")
         
         # Status message for API usage
-        if matching_mode == "Hugging Face GPT2":
+        if st.session_state.matching_mode == "Hugging Face GPT2":
             status_msg = st.info("⏳ Processing with Hugging Face API - this may take a moment...")
         
         all_field_metrics = {}
         
         # Calculate metrics for each field
         for field in fields:
-            _, field_df = field_level_view(parsed_data, field, matching_mode, False, api_key)
+            _, field_df = field_level_view(parsed_data, field, None, False, api_key)
             
             metrics = calculate_metrics(
                 field_df[larger_model], 
                 field_df[smaller_model],
                 field,
-                matching_mode,
+                None,
                 api_key
             )
             
             all_field_metrics[field] = metrics
         
         # Clear status message if present
-        if matching_mode == "Hugging Face GPT2" and 'status_msg' in locals():
+        if st.session_state.matching_mode == "Hugging Face GPT2" and 'status_msg' in locals():
             status_msg.empty()
         
         # Create metrics dataframe
@@ -441,7 +483,7 @@ if uploaded_file:
     st.subheader("Summary of Facts Count")
     summary_data = {}
     for field in fields:
-        _, field_df = field_level_view(parsed_data, field, matching_mode, False, api_key)
+        _, field_df = field_level_view(parsed_data, field, None, False, api_key)
         summary_data[field] = field_df.iloc[:, 1:].apply(lambda col: (col != "N/A - Missing").sum()).to_dict()
 
     summary_df = pd.DataFrame(summary_data).T
@@ -452,14 +494,14 @@ if uploaded_file:
         st.write(f"### Field: {field}")
         
         # Show Hugging Face processing status if applicable
-        if matching_mode == "Hugging Face GPT2" and show_only_differences:
+        if st.session_state.matching_mode == "Hugging Face GPT2" and show_only_differences:
             status = st.empty()
             status.info("⏳ Processing with Hugging Face API...")
         
-        styled_df, field_df = field_level_view(parsed_data, field, matching_mode, show_only_differences, api_key)
+        styled_df, field_df = field_level_view(parsed_data, field, None, show_only_differences, api_key)
         
         # Clear status message
-        if matching_mode == "Hugging Face GPT2" and show_only_differences and 'status' in locals():
+        if st.session_state.matching_mode == "Hugging Face GPT2" and show_only_differences and 'status' in locals():
             status.empty()
             
         st.write(styled_df)
