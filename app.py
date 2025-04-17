@@ -3,6 +3,159 @@ import pandas as pd
 import ast
 import re
 from difflib import SequenceMatcher
+import requests
+import json
+import time
+import os
+
+
+# Hugging Face API functions
+def compare_with_huggingface(text1, text2, field_name, api_key):
+    """
+    Use Hugging Face's Inference API with GPT2 to compare text values.
+    Returns True if the model determines they are semantically equivalent.
+    """
+    # Create a cache key to avoid redundant API calls
+    cache_key = f"{text1.lower()}|||{text2.lower()}|||{field_name.lower()}"
+    if "hf_cache" not in st.session_state:
+        st.session_state.hf_cache = {}
+    
+    # Return cached result if available
+    if cache_key in st.session_state.hf_cache:
+        return st.session_state.hf_cache[cache_key]
+    
+    # Set up the API request
+    API_URL = "https://api-inference.huggingface.co/models/gpt2"
+    headers = {
+        "Authorization": f"Bearer {api_key}"
+    }
+    
+    # Construct the prompt for semantic comparison
+    prompt = f"""
+    Question: Are these two values for the field "{field_name}" semantically equivalent?
+    Value 1: "{text1}"
+    Value 2: "{text2}"
+    
+    If both values indicate that the information is not available or missing (like "not found", "no value", etc.), 
+    they should be considered equivalent.
+    
+    Answer (yes/no):
+    """
+    
+    try:
+        # Make the API request
+        payload = {"inputs": prompt, "parameters": {"max_length": 50}}
+        response = requests.post(API_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        
+        # Parse the response
+        result = response.json()
+        if isinstance(result, list) and len(result) > 0:
+            generated_text = result[0].get("generated_text", "")
+        else:
+            generated_text = result.get("generated_text", "")
+        
+        # Extract yes/no from the generated text
+        lower_text = generated_text.lower()
+        
+        # Look for yes/no indicators in the response
+        is_equivalent = ("yes" in lower_text and "no " not in lower_text[:lower_text.find("yes")+5]) or \
+                        ("equivalent" in lower_text) or \
+                        ("same" in lower_text and "not same" not in lower_text)
+        
+        # Cache the result
+        st.session_state.hf_cache[cache_key] = is_equivalent
+        return is_equivalent
+        
+    except Exception as e:
+        st.warning(f"Hugging Face API error: {str(e)}. Falling back to basic comparison.")
+        # Fall back to basic comparison
+        return are_values_similar_basic(text1, text2, field_name, True)
+
+
+def is_no_value_message(text, field_name=None):
+    """
+    Check if text represents a "no value" or error message.
+    Returns True if it matches common no-value patterns.
+    """
+    text = text.lower().strip()
+    
+    # List of common phrases indicating no value
+    no_value_phrases = [
+        "not available", "none", "not specified", "null", "not disclosed", "n/a", 
+        "no value", "missing", "unknown", "no data", "not found", "unavailable"
+    ]
+    
+    # Check for exact matches
+    if any(phrase == text for phrase in no_value_phrases):
+        return True
+    
+    # Check for pattern matches
+    if field_name:
+        field_lower = field_name.lower()
+        no_value_patterns = [
+            f"no {field_lower}", 
+            f"{field_lower} not",
+            f"missing {field_lower}", 
+            f"could not find {field_lower}"
+        ]
+        if any(pattern in text for pattern in no_value_patterns):
+            return True
+    
+    # Check for starts with patterns
+    no_value_starts = ["no ", "not ", "missing ", "n/a", "unknown "]
+    if any(text.startswith(start) for start in no_value_starts):
+        return True
+        
+    return False
+
+
+def are_values_similar_basic(val1, val2, field_name=None, fuzzy_match=False):
+    """
+    Compare two values to determine if they are semantically equivalent using basic methods.
+    """
+    val1 = str(val1).strip().lower()
+    val2 = str(val2).strip().lower()
+    
+    # If exactly the same, return True
+    if val1 == val2:
+        return True
+        
+    # If fuzzy matching is enabled
+    if fuzzy_match:
+        # Check if both are "no value" messages
+        if is_no_value_message(val1, field_name) and is_no_value_message(val2, field_name):
+            return True
+            
+        # Use sequence matcher for similarity
+        similarity = SequenceMatcher(None, val1, val2).ratio()
+        if similarity > 0.8:  # Threshold can be adjusted
+            return True
+            
+    return False
+
+
+def are_values_similar(val1, val2, field_name=None, matching_mode="Exact Match", api_key=None):
+    """
+    Compare two values based on the selected matching mode.
+    """
+    val1 = str(val1).strip()
+    val2 = str(val2).strip()
+    
+    # Always return true for exact matches
+    if val1.lower() == val2.lower():
+        return True
+    
+    # If exact matching only
+    if matching_mode == "Exact Match":
+        return False
+    
+    # If using Hugging Face GPT2
+    if matching_mode == "Hugging Face GPT2" and api_key:
+        return compare_with_huggingface(val1, val2, field_name, api_key)
+    
+    # Otherwise use basic fuzzy matching
+    return are_values_similar_basic(val1, val2, field_name, True)
 
 
 def load_data(file):
@@ -54,69 +207,7 @@ def parse_json(df):
     return parsed_data, sorted(fields)
 
 
-def is_no_value_message(text, field_name=None):
-    """
-    Check if text represents a "no value" or error message.
-    Returns True if it matches common no-value patterns.
-    """
-    text = text.lower().strip()
-    
-    # List of common phrases indicating no value
-    no_value_phrases = [
-        "not available", "none", "not specified", "null", "not disclosed", "n/a", 
-        "no value", "missing", "unknown", "no data", "not found", "unavailable"
-    ]
-    
-    # Check for exact matches
-    if any(phrase == text for phrase in no_value_phrases):
-        return True
-    
-    # Check for pattern matches
-    if field_name:
-        field_lower = field_name.lower()
-        no_value_patterns = [
-            f"no {field_lower}", 
-            f"{field_lower} not",
-            f"missing {field_lower}", 
-            f"could not find {field_lower}"
-        ]
-        if any(pattern in text for pattern in no_value_patterns):
-            return True
-    
-    # Check for starts with patterns
-    no_value_starts = ["no ", "not ", "missing ", "n/a", "unknown "]
-    if any(text.startswith(start) for start in no_value_starts):
-        return True
-        
-    return False
-
-
-def are_values_similar(val1, val2, field_name=None, fuzzy_match=False):
-    """
-    Compare two values to determine if they are semantically equivalent.
-    """
-    val1 = val1.strip().lower()
-    val2 = val2.strip().lower()
-    
-    # If exactly the same, return True
-    if val1 == val2:
-        return True
-        
-    # If fuzzy matching is enabled
-    if fuzzy_match:
-        # Check if both are "no value" messages
-        if is_no_value_message(val1, field_name) and is_no_value_message(val2, field_name):
-            return True
-            
-        # Use sequence matcher for similarity
-        similarity = SequenceMatcher(None, val1, val2).ratio()
-        if similarity > 0.8:  # Threshold can be adjusted
-            return True
-            
-    return False
-
-
-def field_level_view(parsed_data, field, fuzzy_match=False, show_only_differences=False):
+def field_level_view(parsed_data, field, matching_mode="Exact Match", show_only_differences=False, api_key=None):
     """
     Generate a view of field values across models.
     If show_only_differences is True, only show rows where models differ.
@@ -159,7 +250,7 @@ def field_level_view(parsed_data, field, fuzzy_match=False, show_only_difference
             for i in range(len(df)):
                 val1 = df[models[0]].iloc[i]
                 val2 = df[models[1]].iloc[i]
-                are_similar = are_values_similar(val1, val2, field, fuzzy_match)
+                are_similar = are_values_similar(val1, val2, field, matching_mode, api_key)
                 mask.append(not are_similar)  # Keep rows where values are NOT similar
                 
             # Apply the mask to show only different rows
@@ -179,7 +270,7 @@ def field_level_view(parsed_data, field, fuzzy_match=False, show_only_difference
             val2 = row.iloc[2]
             
             # Check if values are similar based on current matching mode
-            are_similar = are_values_similar(val1, val2, field, fuzzy_match)
+            are_similar = are_values_similar(val1, val2, field, matching_mode, api_key)
             
             if are_similar:
                 return ["", "background-color: lightgreen", "background-color: lightgreen"]
@@ -199,11 +290,10 @@ def field_level_view(parsed_data, field, fuzzy_match=False, show_only_difference
     return styled_df, df
 
 
-def calculate_metrics(df1, df2, field_name=None, fuzzy_match=False):
+def calculate_metrics(df1, df2, field_name=None, matching_mode="Exact Match", api_key=None):
     """
     Calculate confusion matrix and metrics between two models.
     df1 is considered the "truth" and df2 is the prediction.
-    With fuzzy_match=True, semantically similar error messages are considered the same.
     """
     true_positive = 0
     true_negative = 0
@@ -215,7 +305,7 @@ def calculate_metrics(df1, df2, field_name=None, fuzzy_match=False):
         val2_is_na = val2.strip().lower().startswith("n/a -")
         
         # Compare values based on matching mode
-        values_match = are_values_similar(val1, val2, field_name, fuzzy_match)
+        values_match = are_values_similar(val1, val2, field_name, matching_mode, api_key)
         
         # If both have values (not N/A)
         if not val1_is_na and not val2_is_na:
@@ -260,13 +350,31 @@ def calculate_metrics(df1, df2, field_name=None, fuzzy_match=False):
 st.set_page_config(page_title="Fact Comparison by Field", layout="wide")
 st.sidebar.title("Fact Comparison by Field")
 
+# Initialize session state for Hugging Face API key if not present
+if 'hf_api_key' not in st.session_state:
+    st.session_state.hf_api_key = "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"  # Default API key
+
 # Add matching mode selection in sidebar
 matching_mode = st.sidebar.radio(
     "Matching Mode:",
-    ["Exact Match", "Fuzzy Match"],
-    help="Exact Match: Values must be exactly the same. Fuzzy Match: Similar error messages are considered the same."
+    ["Exact Match", "Basic Fuzzy Match", "Hugging Face GPT2"],
+    help="""
+    Exact Match: Values must be exactly the same.
+    Basic Fuzzy Match: Similar error messages are considered the same using rules and string similarity.
+    Hugging Face GPT2: Uses Hugging Face's GPT2 model to determine semantic similarity.
+    """
 )
-fuzzy_match = matching_mode == "Fuzzy Match"
+
+# Show API key configuration when Hugging Face GPT2 is selected
+if matching_mode == "Hugging Face GPT2":
+    with st.sidebar.expander("Hugging Face API Settings", expanded=False):
+        st.session_state.hf_api_key = st.text_input(
+            "API Key",
+            value=st.session_state.hf_api_key,
+            type="password",
+            help="Enter your Hugging Face API key"
+        )
+        st.info("Using GPT2 model to compare text semantically")
 
 st.title("LLM Output Comparator")
 
@@ -282,7 +390,10 @@ if uploaded_file:
     # Add filter option for two-model comparisons
     show_only_differences = False
     if len(model_columns) == 2:
-        show_only_differences = st.sidebar.checkbox("Show only differences", value=False)
+        show_only_differences = st.checkbox("Show only differences", value=False)
+    
+    # Get API key if using Hugging Face
+    api_key = st.session_state.hf_api_key if matching_mode == "Hugging Face GPT2" else None
     
     # Display comparison metrics for two models
     if len(model_columns) == 2:
@@ -294,20 +405,29 @@ if uploaded_file:
         
         st.write(f"Using **{larger_model}** as the reference model")
         
+        # Status message for API usage
+        if matching_mode == "Hugging Face GPT2":
+            status_msg = st.info("⏳ Processing with Hugging Face API - this may take a moment...")
+        
         all_field_metrics = {}
         
         # Calculate metrics for each field
         for field in fields:
-            _, field_df = field_level_view(parsed_data, field, fuzzy_match)
+            _, field_df = field_level_view(parsed_data, field, matching_mode, False, api_key)
             
             metrics = calculate_metrics(
                 field_df[larger_model], 
                 field_df[smaller_model],
                 field,
-                fuzzy_match
+                matching_mode,
+                api_key
             )
             
             all_field_metrics[field] = metrics
+        
+        # Clear status message if present
+        if matching_mode == "Hugging Face GPT2" and 'status_msg' in locals():
+            status_msg.empty()
         
         # Create metrics dataframe
         metrics_df = pd.DataFrame(all_field_metrics).T
@@ -321,7 +441,7 @@ if uploaded_file:
     st.subheader("Summary of Facts Count")
     summary_data = {}
     for field in fields:
-        _, field_df = field_level_view(parsed_data, field, fuzzy_match)
+        _, field_df = field_level_view(parsed_data, field, matching_mode, False, api_key)
         summary_data[field] = field_df.iloc[:, 1:].apply(lambda col: (col != "N/A - Missing").sum()).to_dict()
 
     summary_df = pd.DataFrame(summary_data).T
@@ -330,7 +450,18 @@ if uploaded_file:
     st.subheader("Field Level View for All Fields")
     for field in fields:
         st.write(f"### Field: {field}")
-        styled_df, field_df = field_level_view(parsed_data, field, fuzzy_match, show_only_differences)
+        
+        # Show Hugging Face processing status if applicable
+        if matching_mode == "Hugging Face GPT2" and show_only_differences:
+            status = st.empty()
+            status.info("⏳ Processing with Hugging Face API...")
+        
+        styled_df, field_df = field_level_view(parsed_data, field, matching_mode, show_only_differences, api_key)
+        
+        # Clear status message
+        if matching_mode == "Hugging Face GPT2" and show_only_differences and 'status' in locals():
+            status.empty()
+            
         st.write(styled_df)
 
         non_na_counts = field_df.iloc[:, 1:].apply(lambda col: col.map(lambda x: not x.lower().startswith("n/a -")).sum())
